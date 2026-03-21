@@ -392,36 +392,168 @@ Public API (consumed by other modules):
 """
 ```
 
-## Migrations with Alembic
+## ORM Registry & Migrations
 
-Every project using SQLAlchemy ORM should include Alembic for schema migrations:
+### Why a Registry Is Needed
+
+SQLAlchemy registers ORM models in `Base.metadata` **when the Python module is imported** — not before. If a module is never imported, `Base.metadata` has no knowledge of its tables.
+
+This creates a technical requirement: **all ORM models must be imported in a central location** so that:
+
+1. **Alembic autogenerate** detects all tables when running `alembic revision --autogenerate`
+2. **Workers** (separate processes that don't import routers or services) have access to all models via the SQLAlchemy mapper
+
+Without this, Alembic may generate migrations that **drop tables** it doesn't know about, and workers will fail with mapper errors.
+
+### `app/orm.py` — The ORM Registry
+
+The registry lives at `app/orm.py` — a composition-level file next to `main.py`. Just as `main.py` imports all routers to register them with FastAPI, `orm.py` imports all models to register them in `Base.metadata`.
+
+**Why `app/` root level**: The skill's import rules prohibit `core/ → modules/*` and `shared/ → modules/*`. The registry must import from all modules, so it belongs at the composition level — not in `core/` or `shared/`.
+
+**Why `orm.py`** (not `models.py` or `db.py`): "Models" is ambiguous in projects that also involve AI/LLM (where `models/` commonly refers to AI models). `db.py` overlaps with `core/database.py`. "ORM" is unambiguous — it means Object-Relational Mapping, universally understood by Python backend developers.
 
 ```
 app/
-├── alembic/
-│   ├── versions/          # Migration scripts (auto-generated)
-│   ├── env.py             # Migration environment — imports Base.metadata
-│   └── script.py.mako     # Template for new migrations
-├── alembic.ini            # Configuration (database URL, etc.)
+├── main.py                    # Composition root — registers routers
+├── orm.py                     # ORM registry — registers all module models
 ├── core/
-│   └── database.py        # Base lives here — Alembic imports it
-└── modules/
-    └── ...                # Models auto-discovered via Base.metadata
+│   └── database.py            # Engine, sessionmaker, Base, get_db()
+├── modules/
+│   ├── auth/models.py         # Defines User, Login
+│   ├── documents/models.py    # Defines Document
+│   └── billing/models.py      # Defines Subscription, Invoice
+├── alembic/
+│   ├── versions/
+│   ├── env.py                 # Imports app.orm → target_metadata = Base.metadata
+│   └── script.py.mako
+└── alembic.ini
 ```
 
-**Key setup**: Alembic's `env.py` must import `Base` from `core/database.py` and all models from `modules/*/models.py` so that `--autogenerate` detects all tables:
+### Approach 1: Explicit Imports (Default)
+
+The recommended approach — explicit, type-safe, and easy to debug:
+
+```python
+# app/orm.py — ORM Registry
+"""
+Centralized import point that ensures all ORM models are registered
+in Base.metadata. SQLAlchemy only knows about a model after its Python
+module is imported — this file guarantees every model is loaded.
+
+Models are DEFINED in app/modules/{module}/models.py.
+This file only IMPORTS them so Base.metadata is fully populated.
+
+Referenced by:
+- alembic/env.py → for autogenerate to detect all tables
+- workers/*.py → for the SQLAlchemy mapper to know all entities
+"""
+from app.core.database import Base  # noqa: F401
+
+# ── Auth ──
+from app.modules.auth.models import User, Login  # noqa: F401
+
+# ── Documents ──
+from app.modules.documents.models import Document  # noqa: F401
+
+# ── Billing ──
+from app.modules.billing.models import Subscription, Invoice  # noqa: F401
+
+# Adding a new module with ORM models?
+# 1. Create app/modules/{module}/models.py (classes inheriting from Base)
+# 2. Add the import HERE
+# 3. Run: alembic revision --autogenerate -m "add {module} tables"
+```
+
+**When to use**: Most projects (< 15 modules). Full IDE support, type-checker compatible, zero magic.
+
+### Approach 2: Auto-Discovery (Alternative)
+
+For projects with many modules where maintaining explicit imports becomes friction:
+
+```python
+# app/orm.py — ORM Registry (Auto-Discovery)
+"""
+Auto-discovers and imports all ORM models from app/modules/*/models.py.
+Ensures Base.metadata is fully populated for Alembic and workers.
+"""
+import importlib
+import logging
+from pathlib import Path
+
+from app.core.database import Base  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
+
+def _discover_models() -> None:
+    """Import all modules/*/models.py to register ORM models in Base.metadata."""
+    modules_dir = Path(__file__).parent / "modules"
+
+    for models_file in sorted(modules_dir.glob("*/models.py")):
+        module_name = models_file.parent.name
+        import_path = f"app.modules.{module_name}.models"
+        try:
+            importlib.import_module(import_path)
+            logger.debug("Loaded ORM models from %s", import_path)
+        except Exception:
+            logger.exception("Failed to load ORM models from %s", import_path)
+            raise  # Fail fast — a missing model breaks migrations
+
+
+_discover_models()
+```
+
+**When to use**: Projects with 15+ modules, teams that prefer zero-maintenance registry, standardized module structure.
+
+**Trade-offs vs explicit imports**:
+
+| Aspect | Explicit Imports | Auto-Discovery |
+| --- | --- | --- |
+| IDE / type-checker support | Full | None (dynamic imports) |
+| Debuggability | Excellent | Good (with logging) |
+| Maintenance on new module | Update 1 file | Zero |
+| Risk of forgetting import | Exists | Eliminated |
+| Circular import risk | Low (full control) | Medium |
+| Scalability (20+ modules) | Works, file grows | Scales naturally |
+
+**Design choices in the auto-discovery variant**:
+
+- `raise` in the except block = **fail fast**. If a model fails to load, the process stops immediately. This is intentional — it is better to crash on startup than to generate a migration that drops a table.
+- `sorted()` = **deterministic order** (alphabetical by module name).
+- `logger.debug` on success, `logger.exception` on failure — debugging without polluting normal logs.
+- **Why `pathlib.glob()` and not `pkgutil.walk_packages()`**: `pkgutil` is recursive and imports everything inside the package (services, routers, etc.) — unnecessary imports with potential side effects. `pkgutil` also has a known bug where `SystemExit` is not caught by the `onerror` callback (CPython issue #103288). `pathlib.glob("*/models.py")` imports only model files — precise and controlled.
+
+### Consumers — Alembic & Workers
+
+Regardless of which approach you choose, consumers use the same pattern — `import app.orm`:
 
 ```python
 # alembic/env.py
+import app.orm  # noqa: F401 — registers all ORM models in Base.metadata
 from app.core.database import Base
-
-# Import all models so Base.metadata knows about them
-from app.modules.auth.models import *      # noqa
-from app.modules.documents.models import *  # noqa
-from app.modules.billing.models import *    # noqa
 
 target_metadata = Base.metadata
 ```
+
+```python
+# workers/process_task.py
+import app.orm  # noqa: F401 — registers all ORM models in mapper
+
+from app.modules.documents.models import Document
+from app.core.database import get_sync_session
+```
+
+### New Module Checklist
+
+When creating a new module with ORM models:
+
+1. Create `app/modules/{module}/models.py` — define classes inheriting from `Base`
+2. **If using explicit imports**: add the import to `app/orm.py`
+3. **If using auto-discovery**: nothing to do — it is picked up automatically
+4. Run: `alembic revision --autogenerate -m "add {module} tables"`
+5. Review the generated migration script in `alembic/versions/`
+6. Apply: `alembic upgrade head`
 
 **Migration workflow**: `alembic revision --autogenerate -m "add documents table"` → review generated script → `alembic upgrade head`.
 
@@ -432,6 +564,7 @@ target_metadata = Base.metadata
 | HTTP endpoints | `router.py`    | `router = APIRouter(prefix="/things", tags=["things"])`   |
 | Business logic | `service.py`   | `class ThingService:` or standalone `async def` functions |
 | ORM entity     | `models.py`    | `class Thing(Base):`                                      |
+| ORM registry   | `orm.py`       | Imports all models — lives at `app/orm.py` (composition)  |
 | Request DTO    | `schemas.py`   | `class ThingCreateRequest(BaseModel):`                    |
 | Response DTO   | `schemas.py`   | `class ThingResponse(BaseModel):`                         |
 | SQL queries    | `queries.py`   | `async def count_things_this_month(db, user_id):`         |

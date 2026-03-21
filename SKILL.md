@@ -134,6 +134,7 @@ A module **does NOT need** every file. Start minimal, add files as complexity de
 ```
 app/
 ├── main.py                    # Composition root: create app, register routers, apply middleware
+├── orm.py                     # ORM registry: imports all module models so Base.metadata is populated
 ├── core/                      # Infrastructure (technical plumbing, NOT domain contracts)
 │   ├── config.py              # Pydantic Settings (env vars)
 │   ├── database.py            # Engine, sessionmaker, Base, get_db dependency

@@ -267,10 +267,14 @@ async def register(
 
 ## Workers as Domain Extensions
 
-Background workers (Celery, ARQ) are part of the domain — they execute domain logic asynchronously:
+Background workers (Celery, ARQ) are part of the domain — they execute domain logic asynchronously.
+
+> **ORM registry**: Workers run in separate processes that don't import `main.py` or routers. To ensure all ORM models are registered in SQLAlchemy's mapper, workers must `import app.orm` at the top of the module. See `references/module-structure.md` → "ORM Registry & Migrations" for details.
 
 ```python
 # app/workers/ocr_task.py
+import app.orm  # noqa: F401 — registers all ORM models in mapper
+
 from app.modules.documents.models import Document
 from app.modules.documents.events import (
     publish_document_status_changed,
