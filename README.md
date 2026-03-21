@@ -1,6 +1,8 @@
 # FastAPI DDD
 
-Pragmatic Domain-Driven Design skill for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Guides modular FastAPI backend architecture with async SQLAlchemy, Pydantic V2, and clean separation of concerns — without over-engineering.
+Pragmatic Domain-Driven Design skill for AI coding agents. Guides modular FastAPI backend architecture with async SQLAlchemy, Pydantic V2, and clean separation of concerns — without over-engineering.
+
+Compatible with any tool that supports [Skills](https://skills.sh) — Claude Code, Cursor, Copilot, Roo Code, Cline, and others.
 
 ## Install
 
@@ -10,7 +12,7 @@ npx skills add zeine-inc/fastapi-ddd
 
 ## What it does
 
-When triggered, Claude Code acts as a senior backend architect that applies DDD pragmatically. It helps with:
+When triggered, the agent acts as a senior backend architect that applies DDD pragmatically. It helps with:
 
 - Structuring new FastAPI backends from scratch
 - Adding domain modules to existing projects
